@@ -18,6 +18,7 @@ import (
 type UsageReporter struct {
 	provider    string
 	model       string
+	effort      string
 	authID      string
 	authIndex   string
 	apiKey      string
@@ -44,6 +45,15 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 	r.publishWithOutcome(ctx, detail, false)
+}
+
+func (r *UsageReporter) SetEffortFromPayload(payload []byte) {
+	if r == nil {
+		return
+	}
+	if effort := ExtractUsageEffort(payload); effort != "" {
+		r.effort = effort
+	}
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context) {
@@ -94,6 +104,7 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 	return usage.Record{
 		Provider:    r.provider,
 		Model:       r.model,
+		Effort:      r.effort,
 		Source:      r.source,
 		APIKey:      r.apiKey,
 		AuthID:      r.authID,
@@ -114,6 +125,27 @@ func (r *UsageReporter) latency() time.Duration {
 		return 0
 	}
 	return latency
+}
+
+func ExtractUsageEffort(payload []byte) string {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return ""
+	}
+	for _, path := range []string{
+		"reasoning.effort",
+		"reasoning_effort",
+		"thinking.effort",
+		"thinking_level",
+	} {
+		if effort := normalizeUsageEffort(gjson.GetBytes(payload, path).String()); effort != "" {
+			return effort
+		}
+	}
+	return ""
+}
+
+func normalizeUsageEffort(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func APIKeyFromContext(ctx context.Context) string {
