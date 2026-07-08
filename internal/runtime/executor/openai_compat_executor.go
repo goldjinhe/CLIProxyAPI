@@ -29,6 +29,8 @@ type OpenAICompatExecutor struct {
 	cfg      *config.Config
 }
 
+const openAICompatImagesGenerationsAlt = "images/generations"
+
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
 	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
@@ -80,6 +82,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if baseURL == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
 		return
+	}
+
+	if endpoint, ok := openAICompatPassthroughEndpoint(opts.Alt); ok {
+		resp, err = e.executePassthrough(ctx, auth, req, baseURL, apiKey, baseModel, endpoint)
+		if err == nil {
+			reporter.EnsurePublished(ctx)
+		}
+		return resp, err
 	}
 
 	from := opts.SourceFormat
@@ -175,6 +185,83 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+func openAICompatPassthroughEndpoint(alt string) (string, bool) {
+	switch strings.Trim(strings.TrimSpace(alt), "/") {
+	case openAICompatImagesGenerationsAlt:
+		return "/images/generations", true
+	default:
+		return "", false
+	}
+}
+
+func (e *OpenAICompatExecutor) executePassthrough(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, baseURL, apiKey, model, endpoint string) (cliproxyexecutor.Response, error) {
+	payload := req.Payload
+	if len(payload) == 0 {
+		payload = []byte(`{}`)
+	}
+	if strings.TrimSpace(model) != "" {
+		payload = e.overrideModel(payload, model)
+	}
+
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      payload,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return cliproxyexecutor.Response{}, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor: close passthrough response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return cliproxyexecutor.Response{}, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
+		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(body)}
+	}
+	return cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}, nil
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
