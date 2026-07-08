@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -84,6 +88,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return
 	}
 
+	if strings.Trim(strings.TrimSpace(opts.Alt), "/") == openAICompatImagesGenerationsAlt {
+		if dashScopeEndpoint := dashScopeImageGenerationEndpoint(baseURL); dashScopeEndpoint != "" {
+			resp, err = e.executeDashScopeImageGeneration(ctx, auth, req, apiKey, baseModel, dashScopeEndpoint)
+			if err == nil {
+				reporter.EnsurePublished(ctx)
+			}
+			return resp, err
+		}
+	}
 	if endpoint, ok := openAICompatPassthroughEndpoint(opts.Alt); ok {
 		resp, err = e.executePassthrough(ctx, auth, req, baseURL, apiKey, baseModel, endpoint)
 		if err == nil {
@@ -185,6 +198,263 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+func dashScopeImageGenerationEndpoint(baseURL string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	host := strings.ToLower(parsed.Host)
+	if !strings.Contains(host, "dashscope") && !strings.Contains(host, "maas.aliyuncs.com") {
+		return ""
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	switch {
+	case strings.HasSuffix(path, "/compatible-mode/v1"):
+		parsed.Path = strings.TrimSuffix(path, "/compatible-mode/v1") + "/api/v1/services/aigc/multimodal-generation/generation"
+	case strings.HasSuffix(path, "/api/v1"):
+		parsed.Path = path + "/services/aigc/multimodal-generation/generation"
+	case strings.HasSuffix(path, "/services/aigc/multimodal-generation/generation"):
+		parsed.Path = path
+	default:
+		parsed.Path = path + "/api/v1/services/aigc/multimodal-generation/generation"
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+type dashScopeImageRequest struct {
+	Model      string              `json:"model"`
+	Input      dashScopeImageInput `json:"input"`
+	Parameters map[string]any      `json:"parameters,omitempty"`
+}
+
+type dashScopeImageInput struct {
+	Messages []dashScopeImageMessage `json:"messages"`
+}
+
+type dashScopeImageMessage struct {
+	Role    string                  `json:"role"`
+	Content []dashScopeImageContent `json:"content"`
+}
+
+type dashScopeImageContent struct {
+	Text string `json:"text"`
+}
+
+type openAIImageResponse struct {
+	Created int64                     `json:"created"`
+	Data    []openAIImageResponseItem `json:"data"`
+}
+
+type openAIImageResponseItem struct {
+	URL     string `json:"url,omitempty"`
+	B64JSON string `json:"b64_json,omitempty"`
+}
+
+func buildDashScopeImagePayload(payload []byte, model string) ([]byte, string, error) {
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return nil, "", statusErr{code: http.StatusBadRequest, msg: "request body is empty"}
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, "", statusErr{code: http.StatusBadRequest, msg: "invalid image generation request"}
+	}
+	prompt, _ := raw["prompt"].(string)
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return nil, "", statusErr{code: http.StatusBadRequest, msg: "missing required parameter: prompt"}
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model, _ = raw["model"].(string)
+		model = strings.TrimSpace(model)
+	}
+	if model == "" {
+		return nil, "", statusErr{code: http.StatusBadRequest, msg: "missing required parameter: model"}
+	}
+
+	parameters := make(map[string]any)
+	if existing, ok := raw["parameters"].(map[string]any); ok {
+		for key, value := range existing {
+			parameters[key] = value
+		}
+	}
+	if size, ok := raw["size"].(string); ok && strings.TrimSpace(size) != "" {
+		parameters["size"] = normalizeDashScopeImageSize(size)
+	}
+	if n, ok := raw["n"].(float64); ok && n > 0 {
+		parameters["n"] = int(n)
+	}
+	for _, key := range []string{"negative_prompt", "prompt_extend", "watermark", "seed"} {
+		if value, ok := raw[key]; ok {
+			parameters[key] = value
+		}
+	}
+
+	request := dashScopeImageRequest{
+		Model: model,
+		Input: dashScopeImageInput{Messages: []dashScopeImageMessage{{
+			Role:    "user",
+			Content: []dashScopeImageContent{{Text: prompt}},
+		}}},
+	}
+	if len(parameters) > 0 {
+		request.Parameters = parameters
+	}
+	out, err := json.Marshal(request)
+	if err != nil {
+		return nil, "", err
+	}
+	responseFormat, _ := raw["response_format"].(string)
+	return out, strings.TrimSpace(responseFormat), nil
+}
+
+func normalizeDashScopeImageSize(size string) string {
+	size = strings.TrimSpace(size)
+	size = strings.ReplaceAll(size, "×", "*")
+	size = strings.ReplaceAll(size, "x", "*")
+	size = strings.ReplaceAll(size, "X", "*")
+	return size
+}
+
+func convertDashScopeImageResponse(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config, body []byte, responseFormat string) ([]byte, error) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "empty DashScope image response"}
+	}
+	if code := strings.TrimSpace(gjson.GetBytes(body, "code").String()); code != "" {
+		return nil, statusErr{code: http.StatusBadGateway, msg: string(body)}
+	}
+	imageURLs := make([]string, 0, 1)
+	gjson.GetBytes(body, "output.choices").ForEach(func(_, choice gjson.Result) bool {
+		choice.Get("message.content").ForEach(func(_, content gjson.Result) bool {
+			if imageURL := strings.TrimSpace(content.Get("image").String()); imageURL != "" {
+				imageURLs = append(imageURLs, imageURL)
+			}
+			return true
+		})
+		return true
+	})
+	if len(imageURLs) == 0 {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "DashScope image response did not contain image URLs"}
+	}
+
+	openAIResp := openAIImageResponse{
+		Created: time.Now().Unix(),
+		Data:    make([]openAIImageResponseItem, 0, len(imageURLs)),
+	}
+	if strings.EqualFold(strings.TrimSpace(responseFormat), "b64_json") {
+		for _, imageURL := range imageURLs {
+			encoded, err := fetchImageAsBase64(ctx, auth, cfg, imageURL)
+			if err != nil {
+				return nil, err
+			}
+			openAIResp.Data = append(openAIResp.Data, openAIImageResponseItem{B64JSON: encoded})
+		}
+	} else {
+		for _, imageURL := range imageURLs {
+			openAIResp.Data = append(openAIResp.Data, openAIImageResponseItem{URL: imageURL})
+		}
+	}
+	return json.Marshal(openAIResp)
+}
+
+func fetchImageAsBase64(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config, imageURL string) (string, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
+	if err != nil {
+		return "", err
+	}
+	httpResp, err := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0).Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor: close DashScope image body error: %v", errClose)
+		}
+	}()
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		body, _ := io.ReadAll(httpResp.Body)
+		return "", statusErr{code: httpResp.StatusCode, msg: string(body)}
+	}
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(body), nil
+}
+
+func (e *OpenAICompatExecutor) executeDashScopeImageGeneration(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, apiKey, model, endpoint string) (cliproxyexecutor.Response, error) {
+	payload, responseFormat, err := buildDashScopeImagePayload(req.Payload, model)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       endpoint,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      payload,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return cliproxyexecutor.Response{}, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor: close DashScope image response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return cliproxyexecutor.Response{}, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
+		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(body)}
+	}
+	out, err := convertDashScopeImageResponse(ctx, auth, e.cfg, body, responseFormat)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 }
 
 func openAICompatPassthroughEndpoint(alt string) (string, bool) {
