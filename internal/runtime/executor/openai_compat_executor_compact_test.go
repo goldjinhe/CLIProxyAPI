@@ -155,6 +155,172 @@ func TestOpenAICompatExecutorImagesGenerationsPassthrough(t *testing.T) {
 	}
 }
 
+type openAICompatRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f openAICompatRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestDashScopeImageGenerationEndpoint(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+	}{
+		{
+			name:    "compatible mode",
+			baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+			want:    "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+		},
+		{
+			name:    "api v1",
+			baseURL: "https://maas.aliyuncs.com/api/v1",
+			want:    "https://maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+		},
+		{
+			name:    "generation endpoint",
+			baseURL: "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+			want:    "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+		},
+		{
+			name:    "other provider",
+			baseURL: "https://api.example.com/v1",
+			want:    "",
+		},
+		{
+			name:    "lookalike host",
+			baseURL: "https://dashscope.aliyuncs.com.example.com/v1",
+			want:    "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := dashScopeImageGenerationEndpoint(test.baseURL); got != test.want {
+				t.Fatalf("endpoint = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestOpenAICompatExecutorDashScopeImagesGenerations(t *testing.T) {
+	const imageURL = "https://dashscope-result.oss-cn-hangzhou.aliyuncs.com/generated.png"
+	requestCount := 0
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", openAICompatRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			if got := req.Method; got != http.MethodPost {
+				t.Fatalf("method = %q, want POST", got)
+			}
+			if got := req.URL.String(); got != "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation" {
+				t.Fatalf("request URL = %q", got)
+			}
+			if got := req.Header.Get("Authorization"); got != "Bearer dashscope-key" {
+				t.Fatalf("authorization = %q", got)
+			}
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatalf("read request: %v", errRead)
+			}
+			if got := gjson.GetBytes(body, "model").String(); got != "qwen-image-2.0-pro" {
+				t.Fatalf("model = %q; body=%s", got, string(body))
+			}
+			if got := gjson.GetBytes(body, "input.messages.0.content.0.text").String(); got != "draw a cat" {
+				t.Fatalf("prompt = %q; body=%s", got, string(body))
+			}
+			if got := gjson.GetBytes(body, "parameters.size").String(); got != "1024*1024" {
+				t.Fatalf("size = %q; body=%s", got, string(body))
+			}
+			if got := gjson.GetBytes(body, "parameters.n").Int(); got != 1 {
+				t.Fatalf("n = %d; body=%s", got, string(body))
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type":   []string{"application/json"},
+					"Content-Length": []string{"999"},
+				},
+				Body: io.NopCloser(strings.NewReader(`{"output":{"choices":[{"message":{"content":[{"image":"` + imageURL + `"}]}}]}}`)),
+			}, nil
+		case 2:
+			if got := req.Method; got != http.MethodGet {
+				t.Fatalf("image method = %q, want GET", got)
+			}
+			if got := req.URL.String(); got != imageURL {
+				t.Fatalf("image URL = %q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("png-data")),
+			}, nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	}))
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+		"api_key":  "dashscope-key",
+	}}
+	resp, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "qwen-image-2.0-pro",
+		Payload: []byte(`{"model":"gpt-image-1","prompt":"draw a cat","size":"1024x1024","n":1,"response_format":"b64_json"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Headers:      http.Header{"Content-Type": []string{"application/json"}},
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if requestCount != 2 {
+		t.Fatalf("request count = %d, want 2", requestCount)
+	}
+	if got := gjson.GetBytes(resp.Payload, "data.0.b64_json").String(); got != "cG5nLWRhdGE=" {
+		t.Fatalf("b64_json = %q; payload=%s", got, string(resp.Payload))
+	}
+	if got := resp.Headers.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content type = %q", got)
+	}
+	if got := resp.Headers.Get("Content-Length"); got != "" {
+		t.Fatalf("content length = %q, want empty", got)
+	}
+}
+
+func TestOpenAICompatExecutorDashScopeImagesStreamRejected(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+		"api_key":  "dashscope-key",
+	}}
+	_, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "qwen-image-2.0-pro",
+		Payload: []byte(`{"model":"gpt-image-1","prompt":"draw","stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Stream:       true,
+		Headers:      http.Header{"Content-Type": []string{"application/json"}},
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+		},
+	})
+	if err == nil {
+		t.Fatal("ExecuteStream error = nil")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("status = %v, want %d", err, http.StatusBadRequest)
+	}
+	if !strings.Contains(err.Error(), "does not support streaming") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestOpenAICompatExecutorImagesGenerationsStreamsUpstream(t *testing.T) {
 	var gotPath string
 	var gotBody []byte
