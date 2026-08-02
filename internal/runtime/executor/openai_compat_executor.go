@@ -29,11 +29,13 @@ import (
 )
 
 const (
-	openAICompatImageHandlerType            = "openai-image"
-	openAICompatImagesGenerationsPath       = "/images/generations"
-	openAICompatImagesEditsPath             = "/images/edits"
-	openAICompatDefaultImageEndpoint        = openAICompatImagesGenerationsPath
-	openAICompatMultipartMemory       int64 = 32 << 20
+	openAICompatImageHandlerType                  = "openai-image"
+	openAICompatVideoHandlerType                  = "openai-video"
+	openAICompatHappyHorseRetrieveOperation       = "happyhorse/retrieve"
+	openAICompatImagesGenerationsPath             = "/images/generations"
+	openAICompatImagesEditsPath                   = "/images/edits"
+	openAICompatDefaultImageEndpoint              = openAICompatImagesGenerationsPath
+	openAICompatMultipartMemory             int64 = 32 << 20
 )
 
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
@@ -86,6 +88,9 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 }
 
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if opts.SourceFormat.String() == openAICompatVideoHandlerType && helps.IsHappyHorseModel(req.Model) {
+		return e.executeHappyHorseVideo(ctx, auth, req, opts)
+	}
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
@@ -200,6 +205,120 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+func (e *OpenAICompatExecutor) executeHappyHorseVideo(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	baseURL, apiKey := e.resolveCredentials(auth)
+	if baseURL == "" {
+		return resp, statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
+	}
+	nativeBaseURL, err := happyHorseNativeBaseURL(baseURL)
+	if err != nil {
+		return resp, err
+	}
+
+	method := http.MethodPost
+	requestURL := nativeBaseURL + "/services/aigc/video-generation/video-synthesis"
+	payload := []byte(nil)
+	isRetrieve := strings.EqualFold(strings.TrimSpace(opts.Alt), openAICompatHappyHorseRetrieveOperation)
+	if isRetrieve {
+		taskID := helps.HappyHorseTaskID(req.Payload)
+		if taskID == "" {
+			return resp, statusErr{code: http.StatusBadRequest, msg: "video task_id is required"}
+		}
+		method = http.MethodGet
+		requestURL = nativeBaseURL + "/tasks/" + url.PathEscape(taskID)
+	} else {
+		payload, err = helps.BuildHappyHorseVideoPayload(req.Payload, baseModel)
+		if err != nil {
+			return resp, statusErr{code: http.StatusBadRequest, msg: err.Error()}
+		}
+	}
+
+	var bodyReader io.Reader
+	if len(payload) > 0 {
+		bodyReader = bytes.NewReader(payload)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, method, requestURL, bodyReader)
+	if err != nil {
+		return resp, err
+	}
+	if len(payload) > 0 {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	if !isRetrieve {
+		httpReq.Header.Set("X-DashScope-Async", "enable")
+	}
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       requestURL,
+		Method:    method,
+		Headers:   httpReq.Header.Clone(),
+		Body:      payload,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	reporter.ObserveResponse(httpResp)
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor: close HappyHorse response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("HappyHorse request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
+		return resp, statusErr{code: httpResp.StatusCode, msg: string(body)}
+	}
+	reporter.EnsurePublished(ctx)
+	return cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}, nil
+}
+
+func happyHorseNativeBaseURL(baseURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed == nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", statusErr{code: http.StatusBadGateway, msg: "provider baseURL is invalid"}
+	}
+	origin := parsed.Scheme + "://" + parsed.Host
+	path := strings.TrimRight(parsed.Path, "/")
+	if index := strings.Index(path, "/api/v1"); index >= 0 {
+		return origin + path[:index+len("/api/v1")], nil
+	}
+	return origin + "/api/v1", nil
 }
 
 func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
@@ -318,6 +437,9 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if opts.SourceFormat.String() == openAICompatVideoHandlerType && helps.IsHappyHorseModel(req.Model) {
+		return nil, statusErr{code: http.StatusBadRequest, msg: "HappyHorse video generation does not support streaming"}
+	}
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)
 	}

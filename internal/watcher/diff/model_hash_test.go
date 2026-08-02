@@ -36,6 +36,17 @@ func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
 	}
 }
 
+func TestComputeOpenAICompatModelsHash_IncludesVideoFlag(t *testing.T) {
+	textModel := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "happyhorse-1.1-t2v", Alias: "hh"}})
+	videoModel := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "happyhorse-1.1-t2v", Alias: "hh", Video: true}})
+	if textModel == "" || videoModel == "" {
+		t.Fatal("hashes should not be empty")
+	}
+	if textModel == videoModel {
+		t.Fatal("hash should change when video flag changes")
+	}
+}
+
 func TestComputeOpenAICompatModelsHash_NormalizesAndDedups(t *testing.T) {
 	a := []config.OpenAICompatibilityModel{
 		{Name: "gpt-4", Alias: "gpt4"},

@@ -22,16 +22,22 @@ func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
 				Alias: "compat-image",
 				Image: true,
 			},
+			{
+				Name:  "happyhorse-1.1-t2v",
+				Alias: "happyhorse-t2v",
+				Video: true,
+			},
 		},
 	}
 
 	models := buildOpenAICompatibilityConfigModels(compat)
-	if len(models) != 2 {
-		t.Fatalf("model count = %d, want 2", len(models))
+	if len(models) != 3 {
+		t.Fatalf("model count = %d, want 3", len(models))
 	}
 
 	var vision *ModelInfo
 	var imageModel *ModelInfo
+	var videoModel *ModelInfo
 	for _, model := range models {
 		if model == nil {
 			continue
@@ -41,6 +47,8 @@ func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
 			vision = model
 		case "compat-image":
 			imageModel = model
+		case "happyhorse-t2v":
+			videoModel = model
 		}
 	}
 	if vision == nil {
@@ -63,6 +71,15 @@ func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
 	}
 	if len(imageModel.SupportedInputModalities) != 0 {
 		t.Fatalf("image model input modalities = %+v, want none", imageModel.SupportedInputModalities)
+	}
+	if videoModel == nil {
+		t.Fatal("expected video model")
+	}
+	if videoModel.Type != registry.OpenAIVideoModelType {
+		t.Fatalf("video model type = %q, want %q", videoModel.Type, registry.OpenAIVideoModelType)
+	}
+	if videoModel.Thinking != nil {
+		t.Fatalf("video model thinking = %+v, want nil", videoModel.Thinking)
 	}
 }
 

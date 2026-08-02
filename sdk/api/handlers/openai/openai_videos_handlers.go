@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -25,19 +26,21 @@ import (
 )
 
 const (
-	videosPath               = "/v1/videos"
-	openAIVideosPath         = "/openai/v1/videos"
-	xaiVideosGenerationsAPI  = "/v1/videos/generations"
-	xaiVideosEditsAPI        = "/v1/videos/edits"
-	xaiVideosExtensionsAPI   = "/v1/videos/extensions"
-	defaultOpenAIVideosModel = "sora-2"
-	defaultXAIVideosModel    = "grok-imagine-video"
-	xaiVideos15PreviewModel  = "grok-imagine-video-1.5-preview"
-	xaiVideosHandlerType     = "openai-video"
-	defaultVideosSeconds     = "4"
-	defaultVideosSize        = "720x1280"
-	defaultVideosResolution  = "720p"
-	maxXAIVideoReferences    = 7
+	videosPath                  = "/v1/videos"
+	openAIVideosPath            = "/openai/v1/videos"
+	xaiVideosGenerationsAPI     = "/v1/videos/generations"
+	xaiVideosEditsAPI           = "/v1/videos/edits"
+	xaiVideosExtensionsAPI      = "/v1/videos/extensions"
+	defaultOpenAIVideosModel    = "sora-2"
+	defaultXAIVideosModel       = "grok-imagine-video"
+	xaiVideos15PreviewModel     = "grok-imagine-video-1.5-preview"
+	xaiVideosHandlerType        = "openai-video"
+	happyHorseCreateOperation   = "happyhorse/create"
+	happyHorseRetrieveOperation = "happyhorse/retrieve"
+	defaultVideosSeconds        = "4"
+	defaultVideosSize           = "720x1280"
+	defaultVideosResolution     = "720p"
+	maxXAIVideoReferences       = 7
 )
 
 const defaultVideoAuthBindingTTL = 3 * time.Hour
@@ -161,8 +164,25 @@ func isSoraVideosModel(model string) bool {
 	return baseModel == defaultOpenAIVideosModel || strings.HasPrefix(baseModel, defaultOpenAIVideosModel+"-")
 }
 
+func isHappyHorseVideosModel(model string) bool {
+	if helps.IsHappyHorseModel(model) {
+		return true
+	}
+	candidates := []string{strings.TrimSpace(model)}
+	if baseModel := videosModelBase(model); baseModel != "" && baseModel != candidates[0] {
+		candidates = append(candidates, baseModel)
+	}
+	for _, candidate := range candidates {
+		info := registry.GetGlobalRegistry().GetModelInfo(candidate, "")
+		if info != nil && info.Type == registry.OpenAIVideoModelType {
+			return true
+		}
+	}
+	return false
+}
+
 func isSupportedVideosModel(model string) bool {
-	return isXAIVideosModel(model) || isSoraVideosModel(model)
+	return isXAIVideosModel(model) || isSoraVideosModel(model) || isHappyHorseVideosModel(model)
 }
 
 func rejectUnsupportedVideosModel(c *gin.Context, model string) bool {
@@ -205,7 +225,20 @@ func canonicalXAIVideosModel(model string) string {
 	return defaultXAIVideosModel
 }
 
+func canonicalVideoBindingModel(model string) string {
+	if helps.IsHappyHorseModel(model) {
+		return helps.CanonicalHappyHorseModel(model)
+	}
+	if isHappyHorseVideosModel(model) {
+		return strings.TrimSpace(model)
+	}
+	return canonicalXAIVideosModel(model)
+}
+
 func responseVideosModel(model string) string {
+	if helps.IsHappyHorseModel(model) || isHappyHorseVideosModel(model) {
+		return strings.TrimSpace(model)
+	}
 	return canonicalXAIVideosModel(model)
 }
 
@@ -298,11 +331,11 @@ func (h *OpenAIAPIHandler) bindVideoAuthIDAndModelFromPayload(payload []byte, au
 	if videoID == "" {
 		return
 	}
-	videoAuthBindings.setWithModel(videoID, authID, canonicalXAIVideosModel(model), h.videoAuthBindingTTL())
+	videoAuthBindings.setWithModel(videoID, authID, canonicalVideoBindingModel(model), h.videoAuthBindingTTL())
 }
 
 func (h *OpenAIAPIHandler) bindVideoAuthID(videoID string, authID string, model string) {
-	videoAuthBindings.setWithModel(videoID, authID, canonicalXAIVideosModel(model), h.videoAuthBindingTTL())
+	videoAuthBindings.setWithModel(videoID, authID, canonicalVideoBindingModel(model), h.videoAuthBindingTTL())
 }
 
 func (h *OpenAIAPIHandler) contextWithVideoAuthBinding(ctx context.Context, videoID string) context.Context {
@@ -661,6 +694,154 @@ func xaiVideoContentURLFromPayload(payload []byte) (string, error) {
 	return rawURL, nil
 }
 
+func happyHorseVideoContentURLFromPayload(payload []byte) (string, error) {
+	rawURL := strings.TrimSpace(helps.HappyHorseVideoURL(payload))
+	if rawURL == "" {
+		return "", fmt.Errorf("HappyHorse video response did not include output.video_url")
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed == nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return "", fmt.Errorf("HappyHorse video response included invalid output.video_url")
+	}
+	return rawURL, nil
+}
+
+func happyHorseRequestPrompt(payload []byte) string {
+	prompt := strings.TrimSpace(gjson.GetBytes(payload, "prompt").String())
+	if prompt == "" {
+		prompt = strings.TrimSpace(gjson.GetBytes(payload, "input.prompt").String())
+	}
+	return prompt
+}
+
+func happyHorseRequestSeconds(payload []byte) string {
+	for _, path := range []string{"seconds", "duration", "parameters.duration"} {
+		if value := gjson.GetBytes(payload, path); value.Exists() {
+			return strings.TrimSpace(value.String())
+		}
+	}
+	return "5"
+}
+
+func happyHorseRequestSize(payload []byte) string {
+	for _, path := range []string{"size", "parameters.size"} {
+		if value := strings.TrimSpace(gjson.GetBytes(payload, path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func setHappyHorseError(out []byte, payload []byte, failed bool) []byte {
+	code := ""
+	message := ""
+	for _, path := range []string{"output.code", "code", "error.code"} {
+		if value := strings.TrimSpace(gjson.GetBytes(payload, path).String()); value != "" {
+			code = value
+			break
+		}
+	}
+	for _, path := range []string{"output.message", "message", "error.message", "error"} {
+		if value := strings.TrimSpace(gjson.GetBytes(payload, path).String()); value != "" {
+			message = value
+			break
+		}
+	}
+	if !failed && code == "" && message == "" {
+		return out
+	}
+	if code == "" {
+		code = "video_generation_failed"
+	}
+	if message == "" {
+		message = "HappyHorse video generation failed"
+	}
+	out, _ = sjson.SetBytes(out, "error.code", code)
+	out, _ = sjson.SetBytes(out, "error.message", message)
+	return out
+}
+
+func happyHorseResponseStatus(payload []byte) string {
+	status := openAIVideoStatus(helps.HappyHorseTaskStatus(payload))
+	if status == "" {
+		status = "queued"
+	}
+	return status
+}
+
+func setHappyHorseProgress(out []byte, payload []byte, status string) []byte {
+	for _, path := range []string{"output.progress", "progress"} {
+		if value := gjson.GetBytes(payload, path); value.Exists() {
+			out, _ = sjson.SetRawBytes(out, "progress", []byte(value.Raw))
+			return out
+		}
+	}
+	if status == "completed" {
+		out, _ = sjson.SetRawBytes(out, "progress", []byte("100"))
+	} else {
+		out, _ = sjson.SetRawBytes(out, "progress", []byte("0"))
+	}
+	return out
+}
+
+func buildHappyHorseCreateAPIResponse(payload []byte, model string, request []byte) ([]byte, error) {
+	taskID := helps.HappyHorseTaskID(payload)
+	if taskID == "" {
+		return nil, fmt.Errorf("HappyHorse video response did not include task_id")
+	}
+	status := happyHorseResponseStatus(payload)
+	out := []byte(`{"object":"video"}`)
+	out, _ = sjson.SetBytes(out, "id", taskID)
+	out, _ = sjson.SetBytes(out, "model", responseVideosModel(model))
+	out, _ = sjson.SetBytes(out, "status", status)
+	out = setHappyHorseProgress(out, payload, status)
+	out, _ = sjson.SetBytes(out, "created_at", time.Now().Unix())
+	if prompt := happyHorseRequestPrompt(request); prompt != "" {
+		out, _ = sjson.SetBytes(out, "prompt", prompt)
+	}
+	if seconds := happyHorseRequestSeconds(request); seconds != "" {
+		out, _ = sjson.SetBytes(out, "seconds", seconds)
+	}
+	if size := happyHorseRequestSize(request); size != "" {
+		out, _ = sjson.SetBytes(out, "size", size)
+	}
+	if videoURL := helps.HappyHorseVideoURL(payload); videoURL != "" {
+		out, _ = sjson.SetBytes(out, "video_url", videoURL)
+	}
+	return setHappyHorseError(out, payload, status == "failed"), nil
+}
+
+func buildHappyHorseRetrieveAPIResponse(videoID string, payload []byte, fallbackModel string) ([]byte, error) {
+	taskID := strings.TrimSpace(videoID)
+	if taskID == "" {
+		taskID = helps.HappyHorseTaskID(payload)
+	}
+	if taskID == "" {
+		return nil, fmt.Errorf("HappyHorse video response did not include task_id")
+	}
+	status := happyHorseResponseStatus(payload)
+	model := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	if model == "" {
+		model = responseVideosModel(fallbackModel)
+	}
+	out := []byte(`{"object":"video"}`)
+	out, _ = sjson.SetBytes(out, "id", taskID)
+	out, _ = sjson.SetBytes(out, "model", model)
+	out, _ = sjson.SetBytes(out, "status", status)
+	out = setHappyHorseProgress(out, payload, status)
+	prompt := strings.TrimSpace(gjson.GetBytes(payload, "output.orig_prompt").String())
+	if prompt == "" {
+		prompt = strings.TrimSpace(gjson.GetBytes(payload, "input.prompt").String())
+	}
+	if prompt != "" {
+		out, _ = sjson.SetBytes(out, "prompt", prompt)
+	}
+	if videoURL := helps.HappyHorseVideoURL(payload); videoURL != "" {
+		out, _ = sjson.SetBytes(out, "video_url", videoURL)
+	}
+	return setHappyHorseError(out, payload, status == "failed"), nil
+}
+
 func openAIVideoStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "queued", "pending":
@@ -670,6 +851,8 @@ func openAIVideoStatus(status string) string {
 	case "completed", "done", "succeeded", "success":
 		return "completed"
 	case "failed", "error", "expired", "cancelled", "canceled":
+		return "failed"
+	case "unknown":
 		return "failed"
 	default:
 		return ""
@@ -688,6 +871,14 @@ func (h *OpenAIAPIHandler) VideosCreate(c *gin.Context) {
 		videoModel = defaultXAIVideosModel
 	}
 	if rejectUnsupportedVideosModel(c, videoModel) {
+		return
+	}
+	if isHappyHorseVideosModel(videoModel) {
+		if _, err := helps.BuildHappyHorseVideoPayload(rawJSON, videoModel); err != nil {
+			writeVideosFailedError(c, http.StatusBadRequest, responseVideosModel(videoModel), "invalid_request_error", fmt.Sprintf("Invalid request: %v", err))
+			return
+		}
+		h.collectHappyHorseVideosCreate(c, rawJSON, videoModel)
 		return
 	}
 
@@ -769,6 +960,10 @@ func (h *OpenAIAPIHandler) VideosRetrieve(c *gin.Context) {
 
 	payload := []byte(`{}`)
 	payload, _ = sjson.SetBytes(payload, "request_id", videoID)
+	if executionModel := h.modelWithVideoAuthBinding(videoID, defaultXAIVideosModel); isHappyHorseVideosModel(executionModel) {
+		h.collectHappyHorseVideosRetrieve(c, videoID, executionModel)
+		return
+	}
 
 	c.Header("Content-Type", "application/json")
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
@@ -828,6 +1023,10 @@ func (h *OpenAIAPIHandler) VideosContent(c *gin.Context) {
 				Type:    "invalid_request_error",
 			},
 		})
+		return
+	}
+	if executionModel := h.modelWithVideoAuthBinding(videoID, defaultXAIVideosModel); isHappyHorseVideosModel(executionModel) {
+		h.collectHappyHorseVideosContent(c, videoID, executionModel)
 		return
 	}
 
@@ -948,6 +1147,116 @@ func copyVideoContentHeaders(dst http.Header, src http.Header) {
 			dst.Set(key, value)
 		}
 	}
+}
+
+func (h *OpenAIAPIHandler) collectHappyHorseVideosCreate(c *gin.Context, rawJSON []byte, model string) {
+	c.Header("Content-Type", "application/json")
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	selectedAuthID := ""
+	cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+		selectedAuthID = authID
+	})
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, model, rawJSON, happyHorseCreateOperation)
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		if errMsg.Error != nil {
+			cliCancel(errMsg.Error)
+		} else {
+			cliCancel(nil)
+		}
+		return
+	}
+
+	out, err := buildHappyHorseCreateAPIResponse(resp, model, rawJSON)
+	if err != nil {
+		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(err)
+		return
+	}
+	if taskID := helps.HappyHorseTaskID(resp); taskID != "" {
+		h.bindVideoAuthID(taskID, selectedAuthID, model)
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(out)
+	cliCancel(nil)
+}
+
+func (h *OpenAIAPIHandler) collectHappyHorseVideosRetrieve(c *gin.Context, videoID string, model string) {
+	c.Header("Content-Type", "application/json")
+
+	payload := []byte("{}")
+	payload, _ = sjson.SetBytes(payload, "request_id", videoID)
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	selectedAuthID := ""
+	cliCtx = h.contextWithVideoAuthBinding(cliCtx, videoID)
+	cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+		selectedAuthID = authID
+	})
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, model, payload, happyHorseRetrieveOperation)
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		if errMsg.Error != nil {
+			cliCancel(errMsg.Error)
+		} else {
+			cliCancel(nil)
+		}
+		return
+	}
+
+	out, err := buildHappyHorseRetrieveAPIResponse(videoID, resp, model)
+	if err != nil {
+		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(err)
+		return
+	}
+	h.bindVideoAuthID(videoID, selectedAuthID, model)
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(out)
+	cliCancel(nil)
+}
+
+func (h *OpenAIAPIHandler) collectHappyHorseVideosContent(c *gin.Context, videoID string, model string) {
+	payload := []byte("{}")
+	payload, _ = sjson.SetBytes(payload, "request_id", videoID)
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	selectedAuthID := ""
+	cliCtx = h.contextWithVideoAuthBinding(cliCtx, videoID)
+	cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+		selectedAuthID = authID
+	})
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	resp, _, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, model, payload, happyHorseRetrieveOperation)
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		if errMsg.Error != nil {
+			cliCancel(errMsg.Error)
+		} else {
+			cliCancel(nil)
+		}
+		return
+	}
+
+	h.bindVideoAuthID(videoID, selectedAuthID, model)
+	contentURL, err := happyHorseVideoContentURLFromPayload(resp)
+	if err != nil {
+		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(err)
+		return
+	}
+	if errDownload := h.writeVideoContentFromURL(c, contentURL); errDownload != nil {
+		cliCancel(errDownload)
+		return
+	}
+	cliCancel(nil)
 }
 
 func (h *OpenAIAPIHandler) collectXAIVideosNative(c *gin.Context, rawJSON []byte, model string, bindCreatedVideoAuth bool) {

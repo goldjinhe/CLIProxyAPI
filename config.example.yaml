@@ -367,6 +367,7 @@ nonstream-keepalive-interval: 0
 #         alias: "kimi-k2"               # The alias used in the API.
 #         display-name: "Kimi K2"         # optional catalog display name
 #         image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits (not chat/responses image input)
+#         video: false                   # optional: set true to expose this model on /openai/v1/videos
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]

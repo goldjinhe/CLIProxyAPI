@@ -2533,7 +2533,9 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 	for i := range compat.Models {
 		model := compat.Models[i]
 		modelType := "openai-compatibility"
-		if model.Image {
+		if model.Video {
+			modelType = registry.OpenAIVideoModelType
+		} else if model.Image {
 			modelType = registry.OpenAIImageModelType
 		}
 		info := buildConfiguredModelInfo(model, compat.Name, modelType, now, strings.TrimSpace(model.Alias), false)
@@ -2541,7 +2543,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 			continue
 		}
 		thinking := model.Thinking
-		if thinking == nil && !model.Image {
+		if thinking == nil && !model.Image && !model.Video {
 			thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
 		info.Thinking = thinking
