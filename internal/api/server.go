@@ -432,7 +432,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) exampleAPIKeySafeModeRequired(cfg *config.Config) bool {
-	return s != nil && s.exampleAPIKeySafeModeEnabled && cfg != nil && safemode.HasExampleAPIKeys(cfg.APIKeys)
+	return s != nil && s.exampleAPIKeySafeModeEnabled && cfg != nil && safemode.HasExampleAPIKeys(cfg.ClientAPIKeys())
 }
 
 func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
@@ -468,7 +468,7 @@ func (s *Server) serveExampleAPIKeyWarningPage(c *gin.Context) {
 	cfg := s.cfg
 	var keys []string
 	if cfg != nil {
-		keys = safemode.ExampleAPIKeys(cfg.APIKeys)
+		keys = safemode.ExampleAPIKeys(cfg.ClientAPIKeys())
 	}
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.Header("Cache-Control", "no-store")
@@ -1448,7 +1448,13 @@ func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
 		return nil, false
 	}
 
-	return entries, true
+	filtered := make([]homeModelEntry, 0, len(entries))
+	for _, entry := range entries {
+		if handlers.IsModelAllowedForAccess(c, entry.id) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered, true
 }
 
 func formatHomeGeminiModels(entries []homeModelEntry) []map[string]any {
@@ -2002,6 +2008,9 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 			if result != nil {
 				c.Set("userApiKey", result.Principal)
 				c.Set("accessProvider", result.Provider)
+				if result.AllowedModels != nil {
+					handlers.SetAccessAllowedModels(c, result.AllowedModels)
+				}
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}

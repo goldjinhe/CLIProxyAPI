@@ -69,6 +69,21 @@ api-keys:
   - sk-prod-456
 ```
 
+当客户端密钥只能调用指定模型时，可使用 `api-key-rules`。规则中的密钥可直接用于鉴权，
+无需同时写入 `api-keys`；模型模式支持 `*` 和 `?` 通配符。空的 `allowed-models`
+会禁止该密钥执行任何模型。如果同一密钥也存在于 `api-keys`，为保持向后兼容，
+该密钥仍按无限制密钥处理。
+
+```yaml
+api-key-rules:
+  - api-key: sk-glm-only
+    allowed-models:
+      - glm-*
+```
+
+受限密钥看到的模型列表会自动过滤；在 OpenAI、Claude、Gemini、流式请求和 token
+计数接口中调用未授权模型时，服务会返回 HTTP 403。
+
 ## 引入外部 Go 模块提供者
 
 若要消费其它 Go 模块输出的访问提供者，直接用空白标识符导入以触发其 `init` 注册即可：

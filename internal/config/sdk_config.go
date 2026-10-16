@@ -45,6 +45,10 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// APIKeyRules defines restricted client API keys and the model patterns each key may use.
+	// Keys declared here are valid authentication credentials and do not need to be repeated in APIKeys.
+	APIKeyRules []APIKeyRule `yaml:"api-key-rules,omitempty" json:"api-key-rules,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -55,6 +59,27 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// APIKeyRule restricts a client API key to a set of model name patterns.
+// Patterns support shell-style wildcards such as "glm-*".
+type APIKeyRule struct {
+	APIKey        string   `yaml:"api-key" json:"api-key"`
+	AllowedModels []string `yaml:"allowed-models" json:"allowed-models"`
+}
+
+// ClientAPIKeys returns all configured client authentication keys, including
+// restricted keys declared through APIKeyRules.
+func (c *SDKConfig) ClientAPIKeys() []string {
+	if c == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(c.APIKeys)+len(c.APIKeyRules))
+	keys = append(keys, c.APIKeys...)
+	for i := range c.APIKeyRules {
+		keys = append(keys, c.APIKeyRules[i].APIKey)
+	}
+	return keys
 }
 
 // StreamingConfig holds server streaming behavior configuration.

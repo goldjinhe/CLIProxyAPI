@@ -1,0 +1,38 @@
+host: 0.0.0.0
+port: 8317
+
+api-keys:
+  - replace-with-long-random-drama-gateway-key
+
+openai-compatibility:
+  - name: bailian-subtitles
+    base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api-key-entries:
+      - api-key: replace-with-dashscope-api-key
+    models:
+      - name: qwen-plus-2025-12-01
+        alias: drama-subtitle-semantic
+        display-name: Drama Subtitle Semantic Correction
+        force-mapping: true
+        input-modalities: [text]
+        output-modalities: [text]
+        thinking:
+          levels: [none]
+      - name: qwen-plus-2025-12-01
+        alias: drama-subtitle-translation
+        display-name: Drama Subtitle Translation
+        force-mapping: true
+        input-modalities: [text]
+        output-modalities: [text]
+        thinking:
+          levels: [none]
+
+payload:
+  override:
+    - models:
+        - name: drama-subtitle-semantic
+          protocol: openai
+        - name: drama-subtitle-translation
+          protocol: openai
+      params:
+        enable_thinking: false

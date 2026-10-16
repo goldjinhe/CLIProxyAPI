@@ -69,6 +69,22 @@ api-keys:
   - sk-prod-456
 ```
 
+Use `api-key-rules` when a client key must be limited to specific models. Rule keys
+authenticate on their own and do not need to be repeated under `api-keys`. Model
+patterns support `*` and `?` wildcards. An empty `allowed-models` list denies all
+model execution. If the same key appears under `api-keys`, unrestricted access takes
+precedence for backward compatibility.
+
+```yaml
+api-key-rules:
+  - api-key: sk-glm-only
+    allowed-models:
+      - glm-*
+```
+
+Restricted keys receive a filtered model catalog and HTTP 403 for disallowed model
+execution across OpenAI, Claude, Gemini, streaming, and token-counting routes.
+
 ## Loading Providers from External Go Modules
 
 To consume a provider shipped in another Go module, import it for its registration side effect:

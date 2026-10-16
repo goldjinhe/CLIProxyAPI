@@ -41,6 +41,14 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Restricted API keys. Keys declared here are valid credentials and do not need
+# to be repeated under api-keys. Model patterns support * and ? wildcards.
+# If a key appears in both sections, the unrestricted api-keys entry takes precedence.
+# api-key-rules:
+#   - api-key: "your-restricted-api-key"
+#     allowed-models:
+#       - "glm-*"
+
 # Enable debug logging
 debug: false
 
@@ -383,6 +391,30 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#
+# Bailian subtitle text models. Use a pinned snapshot so subtitle regeneration is
+# reproducible. Keep the upstream API key in the ignored config.yaml, never here.
+#   - name: "bailian-subtitles"
+#     base-url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+#     api-key-entries:
+#       - api-key: "replace-with-dashscope-api-key"
+#     models:
+#       - name: "qwen-plus-2025-12-01"
+#         alias: "drama-subtitle-semantic"
+#         display-name: "Drama Subtitle Semantic Correction"
+#         force-mapping: true
+#         input-modalities: [text]
+#         output-modalities: [text]
+#         thinking:
+#           levels: ["none"]
+#       - name: "qwen-plus-2025-12-01"
+#         alias: "drama-subtitle-translation"
+#         display-name: "Drama Subtitle Translation"
+#         force-mapping: true
+#         input-modalities: [text]
+#         output-modalities: [text]
+#         thinking:
+#           levels: ["none"]
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
@@ -496,6 +528,15 @@ nonstream-keepalive-interval: 0
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
 #         "generationConfig.responseJsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}"
 #   override: # Override rules always set parameters, overwriting any existing values.
+#     # Bailian JSON mode is not reliable while thinking mode is enabled. These
+#     # aliases are dedicated to the subtitle worker, so force non-thinking mode.
+#     - models:
+#         - name: "drama-subtitle-semantic"
+#           protocol: "openai"
+#         - name: "drama-subtitle-translation"
+#           protocol: "openai"
+#       params:
+#         enable_thinking: false
 #     - models:
 #         - name: "gpt-5.4-fast"
 #           protocol: "codex"

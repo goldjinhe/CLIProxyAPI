@@ -17,6 +17,9 @@ services:
     volumes:
       - ./home:/root/.cli-proxy-api
       - ./logs:/CLIProxyAPI/logs
+    networks:
+      - default
+      - subtitle-gateway
     command: >
       sh -eu -c '
         if [ -z "$$HOME_JWT" ]; then
@@ -27,3 +30,8 @@ services:
         exec ./CLIProxyAPI -home-jwt "$$HOME_JWT"
       '
     restart: unless-stopped
+
+networks:
+  subtitle-gateway:
+    name: ${CLI_PROXY_SUBTITLE_NETWORK:-orange-ai-gateway}
+    internal: true

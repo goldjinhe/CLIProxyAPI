@@ -122,6 +122,7 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 支持 OpenAI Codex 多账户轮询
 - 支持 Grok Build 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
+- 百炼 JSON 字幕模型网关示例（见 `examples/bailian-subtitles`）
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 
 ## 新手入门

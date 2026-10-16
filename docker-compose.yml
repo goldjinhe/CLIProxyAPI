@@ -25,4 +25,12 @@ services:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+    networks:
+      - default
+      - subtitle-gateway
     restart: unless-stopped
+
+networks:
+  subtitle-gateway:
+    name: ${CLI_PROXY_SUBTITLE_NETWORK:-orange-ai-gateway}
+    internal: true

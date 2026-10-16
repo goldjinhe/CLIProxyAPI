@@ -34,6 +34,9 @@ func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 	if clone.APIKeys[0] != "client-key" {
 		t.Fatalf("clone.APIKeys[0] = %q, want client-key", clone.APIKeys[0])
 	}
+	if clone.APIKeyRules[0].AllowedModels[0] != "glm-*" {
+		t.Fatalf("clone.APIKeyRules[0].AllowedModels[0] = %q, want glm-*", clone.APIKeyRules[0].AllowedModels[0])
+	}
 	if clone.OAuthExcludedModels["codex"][0] != "hidden-model" {
 		t.Fatalf("clone.OAuthExcludedModels[codex][0] = %q, want hidden-model", clone.OAuthExcludedModels["codex"][0])
 	}
@@ -51,6 +54,7 @@ func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 	}
 
 	clone.APIKeys[0] = "clone-client-key"
+	clone.APIKeyRules[0].AllowedModels[0] = "clone-model"
 	clone.OAuthExcludedModels["codex"][0] = "clone-hidden-model"
 	clone.OAuthModelAlias["codex"][0].Alias = "clone-client-model"
 	clone.OpenAICompatibility[0].Models[0].Thinking.Levels[0] = "clone-low"
@@ -61,6 +65,9 @@ func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 
 	if cfg.APIKeys[0] != "mutated-client-key" {
 		t.Fatalf("cfg.APIKeys[0] = %q, want mutated-client-key", cfg.APIKeys[0])
+	}
+	if cfg.APIKeyRules[0].AllowedModels[0] != "mutated-model" {
+		t.Fatalf("cfg.APIKeyRules[0].AllowedModels[0] = %q, want mutated-model", cfg.APIKeyRules[0].AllowedModels[0])
 	}
 	if cfg.OAuthExcludedModels["codex"][0] != "mutated-hidden-model" {
 		t.Fatalf("cfg.OAuthExcludedModels[codex][0] = %q, want mutated-hidden-model", cfg.OAuthExcludedModels["codex"][0])
@@ -95,6 +102,10 @@ func sampleCloneRuntimeConfig() *Config {
 	return &Config{
 		SDKConfig: SDKConfig{
 			APIKeys: []string{"client-key"},
+			APIKeyRules: []APIKeyRule{{
+				APIKey:        "restricted-key",
+				AllowedModels: []string{"glm-*"},
+			}},
 			Streaming: StreamingConfig{
 				KeepAliveSeconds: 3,
 				BootstrapRetries: 2,
@@ -195,6 +206,7 @@ func sampleCloneRuntimeConfig() *Config {
 func mutateOriginalConfig(cfg *Config) {
 	cfg.Home.Host = "mutated-home.local"
 	cfg.APIKeys[0] = "mutated-client-key"
+	cfg.APIKeyRules[0].AllowedModels[0] = "mutated-model"
 	cfg.OAuthExcludedModels["codex"][0] = "mutated-hidden-model"
 	cfg.OAuthModelAlias["codex"][0].Alias = "mutated-client-model"
 	cfg.OpenAICompatibility[0].Models[0].Thinking.Levels[0] = "mutated-low"

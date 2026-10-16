@@ -262,6 +262,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			RequestLog:                 false,
 			ProxyURL:                   "http://old-proxy",
 			APIKeys:                    []string{"key-1"},
+			APIKeyRules:                []config.APIKeyRule{{APIKey: "restricted-1", AllowedModels: []string{"glm-4.*"}}},
 			ForceModelPrefix:           false,
 			NonStreamKeepAliveInterval: 0,
 		},
@@ -298,6 +299,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			RequestLog:                 true,
 			ProxyURL:                   "http://new-proxy",
 			APIKeys:                    []string{" key-1 ", "key-2"},
+			APIKeyRules:                []config.APIKeyRule{{APIKey: "restricted-2", AllowedModels: []string{"glm-*"}}},
 			ForceModelPrefix:           true,
 			NonStreamKeepAliveInterval: 5,
 			DisableImageGeneration:     config.DisableImageGenerationAll,
@@ -324,6 +326,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "quota-exceeded.switch-preview-model: false -> true")
 	expectContains(t, details, "quota-exceeded.antigravity-credits: false -> true")
 	expectContains(t, details, "api-keys count: 1 -> 2")
+	expectContains(t, details, "api-key-rules: updated (1 -> 1 entries, values redacted)")
 	expectContains(t, details, "claude-api-key count: 1 -> 2")
 	expectContains(t, details, "codex-api-key count: 1 -> 2")
 	expectContains(t, details, "remote-management.disable-control-panel: false -> true")

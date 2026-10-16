@@ -18,6 +18,9 @@ type Result struct {
 	Provider  string
 	Principal string
 	Metadata  map[string]string
+	// AllowedModels contains model patterns available to this principal.
+	// A nil slice means unrestricted access; a non-nil empty slice denies every model.
+	AllowedModels []string
 }
 
 var (

@@ -17,23 +17,25 @@ func Register(cfg *sdkconfig.SDKConfig) {
 	}
 
 	keys := normalizeKeys(cfg.APIKeys)
-	if len(keys) == 0 {
+	rules := normalizeRules(cfg.APIKeyRules)
+	if len(keys) == 0 && len(rules) == 0 {
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return
 	}
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, rules),
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name       string
+	keys       map[string]struct{}
+	modelRules map[string][]string
 }
 
-func newProvider(name string, keys []string) *provider {
+func newProvider(name string, keys []string, rules map[string][]string) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
@@ -42,7 +44,7 @@ func newProvider(name string, keys []string) *provider {
 	for _, key := range keys {
 		keySet[key] = struct{}{}
 	}
-	return &provider{name: providerName, keys: keySet}
+	return &provider{name: providerName, keys: keySet, modelRules: rules}
 }
 
 func (p *provider) Identifier() string {
@@ -56,7 +58,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	if p == nil {
 		return nil, sdkaccess.NewNotHandledError()
 	}
-	if len(p.keys) == 0 {
+	if len(p.keys) == 0 && len(p.modelRules) == 0 {
 		return nil, sdkaccess.NewNotHandledError()
 	}
 	authHeader := r.Header.Get("Authorization")
@@ -98,9 +100,50 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 				},
 			}, nil
 		}
+		if allowedModels, ok := p.modelRules[candidate.value]; ok {
+			models := make([]string, len(allowedModels))
+			copy(models, allowedModels)
+			return &sdkaccess.Result{
+				Provider:      p.Identifier(),
+				Principal:     candidate.value,
+				AllowedModels: models,
+				Metadata: map[string]string{
+					"source": candidate.source,
+				},
+			}, nil
+		}
 	}
 
 	return nil, sdkaccess.NewInvalidCredentialError()
+}
+
+func normalizeRules(rules []sdkconfig.APIKeyRule) map[string][]string {
+	normalized := make(map[string][]string)
+	for i := range rules {
+		key := strings.TrimSpace(rules[i].APIKey)
+		if key == "" {
+			continue
+		}
+		seen := make(map[string]struct{}, len(normalized[key])+len(rules[i].AllowedModels))
+		for _, existing := range normalized[key] {
+			seen[existing] = struct{}{}
+		}
+		for _, rawPattern := range rules[i].AllowedModels {
+			pattern := strings.TrimSpace(rawPattern)
+			if pattern == "" {
+				continue
+			}
+			if _, exists := seen[pattern]; exists {
+				continue
+			}
+			seen[pattern] = struct{}{}
+			normalized[key] = append(normalized[key], pattern)
+		}
+		if _, exists := normalized[key]; !exists {
+			normalized[key] = []string{}
+		}
+	}
+	return normalized
 }
 
 func extractBearerToken(header string) string {
